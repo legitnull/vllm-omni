@@ -63,6 +63,10 @@ _DIFFUSION_MODELS = {
         "sd3",
         "pipeline_sd3",
         "StableDiffusion3Pipeline",
+    "OmniGen2Pipeline": (
+        "omnigen2",
+        "pipeline_omnigen2",
+        "OmniGen2Pipeline",
     ),
 }
 
@@ -108,6 +112,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "LongCatImagePipeline": "get_longcat_image_post_process_func",
     "LongCatImageEditPipeline": "get_longcat_image_post_process_func",
     "StableDiffusion3Pipeline": "get_sd3_image_post_process_func",
+    "OmniGen2Pipeline": "get_omnigen2_post_process_func",
 }
 
 _DIFFUSION_PRE_PROCESS_FUNCS = {

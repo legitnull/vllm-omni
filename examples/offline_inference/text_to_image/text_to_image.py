@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    # region dbpy_attach
+    import debugpy
+    (debugpy.listen(('0.0.0.0', 5678)), debugpy.wait_for_client()) if not debugpy.is_client_connected() else None
+    # endregion
+
     args = parse_args()
     device = detect_device_type()
     generator = torch.Generator(device=device).manual_seed(args.seed)
