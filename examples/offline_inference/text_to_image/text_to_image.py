@@ -21,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt", default="a cup of coffee on the table", help="Text prompt for image generation.")
     parser.add_argument("--seed", type=int, default=142, help="Random seed for deterministic results.")
+    parser.add_argument("--negative_prompt", type=str, default="", help="Negative prompt for image generation.")
+    parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale for text-to-image generation.")
     parser.add_argument(
         "--cfg_scale",
         type=float,
@@ -129,9 +131,11 @@ def main():
     generation_start = time.perf_counter()
     outputs = omni.generate(
         args.prompt,
+        negative_prompt=args.negative_prompt,
         height=args.height,
         width=args.width,
         generator=generator,
+        guidance_scale=args.guidance_scale,
         true_cfg_scale=args.cfg_scale,
         num_inference_steps=args.num_inference_steps,
         num_outputs_per_prompt=args.num_images_per_prompt,

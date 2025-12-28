@@ -64,6 +64,11 @@ _DIFFUSION_MODELS = {
         "pipeline_sd3",
         "StableDiffusion3Pipeline",
     ),
+    "OmniGen2Pipeline": (
+        "omnigen2",
+        "pipeline_omnigen2",
+        "OmniGen2Pipeline",
+    ),
 }
 
 
@@ -108,6 +113,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "LongCatImagePipeline": "get_longcat_image_post_process_func",
     "LongCatImageEditPipeline": "get_longcat_image_post_process_func",
     "StableDiffusion3Pipeline": "get_sd3_image_post_process_func",
+    "OmniGen2Pipeline": "get_omnigen2_post_process_func",
 }
 
 _DIFFUSION_PRE_PROCESS_FUNCS = {
@@ -120,6 +126,7 @@ _DIFFUSION_PRE_PROCESS_FUNCS = {
     "QwenImageLayeredPipeline": "get_qwen_image_layered_pre_process_func",
     "WanPipeline": "get_wan22_pre_process_func",
     "WanImageToVideoPipeline": "get_wan22_i2v_pre_process_func",
+    "OmniGen2Pipeline": "get_omnigen2_pre_process_func",
 }
 
 
