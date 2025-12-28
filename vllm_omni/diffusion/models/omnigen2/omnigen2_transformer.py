@@ -1,6 +1,7 @@
 import logging
 import itertools
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import math
 
 import torch
 import torch.nn as nn
@@ -20,12 +21,140 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.embeddings import Timesteps
 from diffusers.models.embeddings import get_1d_rotary_pos_embed
 
+
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+    ReplicatedLinear,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm_omni.diffusion.attention.layer import Attention
+
 logger = logging.getLogger(__name__)
 
 
 def swiglu(x, y):
     return F.silu(x.float(), inplace=False).to(x.dtype) * y
 
+class OmniGen2Attention(nn.Module):
+    def __init__(self,
+                 dim: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 eps: float = 1e-5,
+                 ):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = dim // num_heads
+        self.eps = eps
+
+        # self.to_q = ReplicatedLinear(dim, dim, bias=False)
+        # self.to_k = ReplicatedLinear(dim, dim, bias=False)
+        # self.to_v = ReplicatedLinear(dim, dim, bias=False)
+        self.to_qkv = QKVParallelLinear(
+            hidden_size=dim,
+            head_size=self.head_dim,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_kv_heads,
+            disable_tp=True,
+            bias=False,
+        )
+
+        self.norm_q = RMSNorm(self.head_dim, eps=eps)
+        self.norm_k = RMSNorm(self.head_dim, eps=eps)
+
+        self.to_out = nn.ModuleList([nn.Linear(dim, dim, bias=False)])
+
+        self.attn = Attention(
+            num_heads=num_heads,
+            head_size=self.head_dim,
+            softmax_scale=1.0 / (self.head_dim**0.5),
+            causal=False,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        base_sequence_length: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Process attention computation with flash attention.
+
+        Args:
+            attn: Attention module
+            hidden_states: Hidden states tensor of shape (batch_size, seq_len, hidden_dim)
+            encoder_hidden_states: Encoder hidden states tensor
+            attention_mask: Optional attention mask tensor
+            image_rotary_emb: Optional rotary embeddings for image tokens
+            base_sequence_length: Optional base sequence length for proportional attention
+
+        Returns:
+            torch.Tensor: Processed hidden states after attention computation
+        """
+        batch_size, sequence_length, _ = hidden_states.shape
+
+        # Get Query-Key-Value Pair
+        qkv, _ = self.to_qkv(hidden_states)
+
+        q_dim = self.num_heads * self.head_dim
+        kv_dim = self.num_kv_heads * self.head_dim
+
+        query = qkv[..., :q_dim]
+        key = qkv[..., q_dim:q_dim + kv_dim]
+        value = qkv[..., q_dim + kv_dim:q_dim + 2 * kv_dim]
+
+        dtype = query.dtype
+
+        # Reshape tensors for attention computation
+        query = query.view(batch_size, sequence_length, self.num_heads, self.head_dim)
+        key = key.view(batch_size, sequence_length, self.num_kv_heads, self.head_dim)
+        value = value.view(batch_size, sequence_length, self.num_kv_heads, self.head_dim)
+
+        # Apply Query-Key normalization
+        if self.norm_q is not None:
+            query = self.norm_q(query)
+        if self.norm_k is not None:
+            key = self.norm_k(key)
+
+        dtype = query.dtype
+
+        # Apply Rotary Position Embeddings
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb(query, image_rotary_emb, use_real=False)
+            key = apply_rotary_emb(key, image_rotary_emb, use_real=False)
+
+        query, key = query.to(dtype), key.to(dtype)
+
+        if self.num_kv_heads < self.num_heads:
+            # Repeat key and value heads to match query heads
+            num_groups = self.num_heads // self.num_kv_heads
+            key = key.repeat_interleave(num_groups, dim=2)
+            value = value.repeat_interleave(num_groups, dim=2)
+
+        # # Calculate attention scale
+        if base_sequence_length is not None:
+            base_scale = self.attn.attn_impl_cls.softmax_scale
+            softmax_scale = math.sqrt(math.log(sequence_length, base_sequence_length)) * base_scale
+            self.attn.attn_impl_cls.softmax_scale = softmax_scale
+
+        hidden_states = self.attn(
+            query,
+            key,
+            value,
+        )
+
+        # Reshape back
+        hidden_states = hidden_states.reshape(batch_size, -1, self.num_heads * self.head_dim)
+        hidden_states = hidden_states.to(dtype)
+
+        hidden_states = self.to_out[0](hidden_states)
+
+        return hidden_states
 
 class OmniGen2AttnProcessor:
     """
@@ -79,8 +208,8 @@ class OmniGen2AttnProcessor:
 
         # Get Query-Key-Value Pair
         query = attn.to_q(hidden_states)
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
 
         query_dim = query.shape[-1]
         inner_dim = key.shape[-1]
@@ -580,23 +709,27 @@ class OmniGen2TransformerBlock(nn.Module):
         self.head_dim = dim // num_attention_heads
         self.modulation = modulation
 
-        # try:
-        #     processor = OmniGen2AttnProcessorFlash2Varlen()
-        # except ImportError:
-        processor = OmniGen2AttnProcessor()
+        # processor = OmniGen2AttnProcessor()
 
-        # Initialize attention layer
-        self.attn = Attention(
-            query_dim=dim,
-            cross_attention_dim=None,
-            dim_head=dim // num_attention_heads,
-            qk_norm="rms_norm",
-            heads=num_attention_heads,
-            kv_heads=num_kv_heads,
+        # from diffusers.models.attention_processor import Attention
+        # # Initialize attention layer
+        # self.attn = Attention(
+        #     query_dim=dim,
+        #     cross_attention_dim=None,
+        #     dim_head=dim // num_attention_heads,
+        #     qk_norm="rms_norm",
+        #     heads=num_attention_heads,
+        #     kv_heads=num_kv_heads,
+        #     eps=1e-5,
+        #     bias=False,
+        #     out_bias=False,
+        #     processor=processor,
+        # )
+        self.attn = OmniGen2Attention(
+            dim=dim,
+            num_heads=num_attention_heads,
+            num_kv_heads=num_kv_heads,
             eps=1e-5,
-            bias=False,
-            out_bias=False,
-            processor=processor,
         )
 
         # Initialize feed-forward network
@@ -621,7 +754,7 @@ class OmniGen2TransformerBlock(nn.Module):
         self.norm2 = RMSNorm(dim, eps=norm_eps)
         self.ffn_norm2 = RMSNorm(dim, eps=norm_eps)
 
-        self.initialize_weights()
+        # self.initialize_weights()
 
     def initialize_weights(self) -> None:
         """
@@ -668,7 +801,7 @@ class OmniGen2TransformerBlock(nn.Module):
             norm_hidden_states, gate_msa, scale_mlp, gate_mlp = self.norm1(hidden_states, temb)
             attn_output = self.attn(
                 hidden_states=norm_hidden_states,
-                encoder_hidden_states=norm_hidden_states,
+                # encoder_hidden_states=norm_hidden_states,
                 attention_mask=attention_mask,
                 image_rotary_emb=image_rotary_emb,
             )
@@ -679,7 +812,7 @@ class OmniGen2TransformerBlock(nn.Module):
             norm_hidden_states = self.norm1(hidden_states)
             attn_output = self.attn(
                 hidden_states=norm_hidden_states,
-                encoder_hidden_states=norm_hidden_states,
+                # encoder_hidden_states=norm_hidden_states,
                 attention_mask=attention_mask,
                 image_rotary_emb=image_rotary_emb,
             )
@@ -1128,3 +1261,31 @@ class OmniGen2Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, From
         if not return_dict:
             return output
         return Transformer2DModelOutput(sample=output)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            # self-attn
+            (".to_qkv", ".to_q", "q"),
+            (".to_qkv", ".to_k", "k"),
+            (".to_qkv", ".to_v", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+
+        loaded_params = set[str]()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

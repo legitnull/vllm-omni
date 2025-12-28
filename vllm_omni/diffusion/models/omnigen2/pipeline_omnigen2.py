@@ -29,10 +29,52 @@ from vllm_omni.diffusion.models.omnigen2.scheduling_flow_match_euler_discrete im
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
-
+from vllm_omni.model_executor.model_loader.weight_utils import (
+    download_weights_from_hf_specific,
+)
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+
+
+def get_omnigen2_pre_process_func(
+    od_config: OmniDiffusionConfig,
+):
+    """Pre-processing function for QwenImageEditPipeline."""
+    model_name = od_config.model
+    if os.path.exists(model_name):
+        model_path = model_name
+    else:
+        model_path = download_weights_from_hf_specific(model_name, None, ["*"])
+    vae_config_path = os.path.join(model_path, "vae/config.json")
+    with open(vae_config_path) as f:
+        vae_config = json.load(f)
+        vae_scale_factor = 2 ** len(vae_config["temporal_downsample"]) if "temporal_downsample" in vae_config else 8
+
+    image_processor = OmniGen2ImageProcessor(vae_scale_factor=vae_scale_factor * 2, do_resize=True)
+    latent_channels = vae_config.get("z_dim", 16)
+
+    def pre_process_func(
+        requests: list[OmniDiffusionRequest],
+    ):
+        """Pre-process requests for QwenImageEditPipeline."""
+        for req in requests:
+            image = req.pil_image
+
+            # Preprocess image
+            if image is not None and not (
+                isinstance(image, torch.Tensor) and len(image.shape) > 1 and image.shape[1] == latent_channels
+            ):
+                # Use the default max_pixels and max_side_length values from the `forward`
+                image = image_processor.preprocess(
+                    image, max_pixels=1024 * 1024, max_side_length=1024
+                )
+                req.preprocessed_image = image
+
+        return requests
+
+    return pre_process_func
 
 
 def get_omnigen2_post_process_func(
@@ -387,13 +429,21 @@ class OmniGen2Pipeline(nn.Module):
         """
         super().__init__()
         self.od_config = od_config
-        # TODO(yupu): Impl
-        self.weights_sources = []
         self.device = get_local_device()
         model = od_config.model
 
         # Check if model is a local path
         local_files_only = os.path.exists(model)
+
+        self.weights_sources = [
+            DiffusersPipelineLoader.ComponentSource(
+                model_or_path=od_config.model,
+                subfolder="transformer",
+                revision=None,
+                prefix="transformer.",
+                fall_back_to_pt=True,
+            )
+        ]
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only
@@ -401,10 +451,43 @@ class OmniGen2Pipeline(nn.Module):
         self.vae = AutoencoderKL.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
             self.device
         )
-        # TODO(yupu): Fix
-        self.transformer = OmniGen2Transformer2DModel.from_pretrained(
-            model, subfolder="transformer", local_files_only=local_files_only
-        ).to(self.device)
+
+        transformer_config_path = os.path.join(model, "transformer", "config.json")
+        transformer_kwargs = {}
+
+        if os.path.exists(transformer_config_path):
+            with open(transformer_config_path) as f:
+                transformer_config = json.load(f)
+
+            param_mapping = {
+                "patch_size": "patch_size",
+                "in_channels": "in_channels",
+                "out_channels": "out_channels",
+                "hidden_size": "hidden_size",
+                "num_layers": "num_layers",
+                "num_refiner_layers": "num_refiner_layers",
+                "num_attention_heads": "num_attention_heads",
+                "num_kv_heads": "num_kv_heads",
+                "multiple_of": "multiple_of",
+                "ffn_dim_multiplier": "ffn_dim_multiplier",
+                "norm_eps": "norm_eps",
+                "axes_dim_rope": "axes_dim_rope",
+                "axes_lens": "axes_lens",
+                "text_feat_dim": "text_feat_dim",
+                "timestep_scale": "timestep_scale",
+            }
+
+            for config_key, param_name in param_mapping.items():
+                if config_key in transformer_config:
+                    value = transformer_config[config_key]
+                    # Handle tuple parameters (axes_dim_rope, axes_lens)
+                    if isinstance(value, list) and param_name in ("axes_dim_rope", "axes_lens"):
+                        value = tuple(value)
+                    transformer_kwargs[param_name] = value
+        self.transformer = OmniGen2Transformer2DModel(**transformer_kwargs)
+        # self.transformer = OmniGen2Transformer2DModel.from_pretrained(
+        #     model, subfolder="transformer", local_files_only=local_files_only
+        # ).to(self.device)
         self.mllm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model, subfolder="mllm", local_files_only=local_files_only
         ).to(self.device)
@@ -503,9 +586,9 @@ class OmniGen2Pipeline(nn.Module):
             if img is not None and len(img) > 0:
                 ref_latents = []
                 for j, img_j in enumerate(img):
-                    img_j = self.image_processor.preprocess(
-                        img_j, max_pixels=max_pixels, max_side_length=max_side_length
-                    )
+                    # img_j = self.image_processor.preprocess(
+                    #     img_j, max_pixels=max_pixels, max_side_length=max_side_length
+                    # )
                     ref_latents.append(self.encode_vae(img_j.to(device=device)).squeeze(0))
             else:
                 ref_latents = None
@@ -743,8 +826,9 @@ class OmniGen2Pipeline(nn.Module):
         width = req.width or width or self.default_sample_size * self.vae_scale_factor
         generator = req.generator or generator
         num_inference_steps = req.num_inference_steps or num_inference_steps
-        # TODO(yupu): Add guidance_scale in `text_to_image.py`
-        self._text_guidance_scale = req.true_cfg_scale or req.guidance_scale or text_guidance_scale
+        # TODO(yupu): Add support for multiple input images.
+        input_images = [req.preprocessed_image] if req.preprocessed_image is not None else input_images
+        self._text_guidance_scale = req.guidance_scale or text_guidance_scale
         self._image_guidance_scale = req.guidance_scale_2 or image_guidance_scale
         self._cfg_range = cfg_range
         self._attention_kwargs = attention_kwargs

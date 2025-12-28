@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
         help="Negative prompt for image generation."
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic results.")
+    parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale for text-to-image generation.")
     parser.add_argument(
         "--cfg_scale",
         type=float,
@@ -76,11 +77,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
-    # region dbpy_attach
-    # import debugpy
-    # (debugpy.listen(('0.0.0.0', 5678)), debugpy.wait_for_client()) if not debugpy.is_client_connected() else None
-    # endregion
-
     args = parse_args()
     device = detect_device_type()
     generator = torch.Generator(device=device).manual_seed(args.seed)
@@ -145,6 +141,7 @@ def main():
         height=args.height,
         width=args.width,
         generator=generator,
+        guidance_scale=args.guidance_scale,
         true_cfg_scale=args.cfg_scale,
         num_inference_steps=args.num_inference_steps,
         num_outputs_per_prompt=args.num_images_per_prompt,

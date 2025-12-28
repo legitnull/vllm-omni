@@ -123,6 +123,8 @@ def parse_args() -> argparse.Namespace:
             "directly as an input parameter. Enabled when guidance_scale > 1. Ignored when not using guidance-distilled models."
         ),
     )
+    parser.add_argument("--guidance_scale", type=float, default=None, help="text guidance scale for image-to-image generation.")
+    parser.add_argument("--guidance_scale_2", type=float, default=None, help="image guidance scale for image-to-image generation.")
     parser.add_argument(
         "--output",
         type=str,
@@ -327,6 +329,7 @@ def main():
             "generator": generator,
             "true_cfg_scale": args.cfg_scale,
             "guidance_scale": args.guidance_scale,
+            "guidance_scale_2": args.guidance_scale_2,
             "num_inference_steps": args.num_inference_steps,
             "num_outputs_per_prompt": args.num_outputs_per_prompt,
             "layers": args.layers,
