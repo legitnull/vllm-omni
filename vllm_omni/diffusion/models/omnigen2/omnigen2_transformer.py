@@ -1,17 +1,12 @@
 import logging
-import warnings
 import itertools
 from typing import Any, Dict, List, Optional, Tuple, Union
-
-import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
 from einops import rearrange
-
+from einops import repeat
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import PeftAdapterMixin
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
@@ -19,30 +14,18 @@ from diffusers.utils import USE_PEFT_BACKEND, scale_lora_layers, unscale_lora_la
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
-
-# from ..attention_processor import OmniGen2AttnProcessorFlash2Varlen, OmniGen2AttnProcessor
-# from .block_lumina2 import LuminaLayerNormContinuous, LuminaRMSNormZero, LuminaFeedForward, Lumina2CombinedTimestepCaptionEmbedding
-
-# from ...utils.import_utils import is_triton_available, is_flash_attn_available
-
-# if is_triton_available():
-#     from ...ops.triton.layer_norm import RMSNorm
-# else:
 from torch.nn import RMSNorm
-
+from diffusers.models.activations import get_activation
+from diffusers.models.attention_processor import Attention
+from diffusers.models.embeddings import Timesteps
+from diffusers.models.embeddings import get_1d_rotary_pos_embed
 
 logger = logging.getLogger(__name__)
 
-import torch
-from torch import nn
-
-
-from diffusers.models.activations import get_activation
-
-from diffusers.models.attention_processor import Attention
 
 def swiglu(x, y):
     return F.silu(x.float(), inplace=False).to(x.dtype) * y
+
 
 class OmniGen2AttnProcessor:
     """
@@ -261,13 +244,6 @@ def apply_rotary_emb(
 
         return x_out.type_as(x)
 
-import warnings
-from typing import Optional, Tuple
-
-import torch
-import torch.nn as nn
-
-from diffusers.models.embeddings import Timesteps
 
 class LuminaRMSNormZero(nn.Module):
     """
@@ -442,13 +418,6 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         caption_embed = self.caption_embedder(text_hidden_states)
         return time_embed, caption_embed
 
-from typing import List, Tuple
-
-import torch
-import torch.nn as nn
-
-from einops import repeat
-from diffusers.models.embeddings import get_1d_rotary_pos_embed
 
 class OmniGen2RotaryPosEmbed(nn.Module):
     def __init__(self, theta: int,

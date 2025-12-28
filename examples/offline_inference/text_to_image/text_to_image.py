@@ -22,6 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default="a cup of coffee on the table", help="Text prompt for image generation.")
     parser.add_argument("--seed", type=int, default=142, help="Random seed for deterministic results.")
     parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default="",
+        help="Negative prompt for image generation."
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic results.")
+    parser.add_argument(
         "--cfg_scale",
         type=float,
         default=4.0,
@@ -70,8 +77,8 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     # region dbpy_attach
-    import debugpy
-    (debugpy.listen(('0.0.0.0', 5678)), debugpy.wait_for_client()) if not debugpy.is_client_connected() else None
+    # import debugpy
+    # (debugpy.listen(('0.0.0.0', 5678)), debugpy.wait_for_client()) if not debugpy.is_client_connected() else None
     # endregion
 
     args = parse_args()
@@ -134,6 +141,7 @@ def main():
     generation_start = time.perf_counter()
     outputs = omni.generate(
         args.prompt,
+        negative_prompt=args.negative_prompt,
         height=args.height,
         width=args.width,
         generator=generator,

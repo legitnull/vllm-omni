@@ -1,37 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
-from typing import Any, Dict, List, Optional, Tuple, Union
 from collections.abc import Iterable
+from typing import Any, List, Optional, Tuple, Union
+import inspect
 import logging
 import os
+import warnings
+from typing import List, Optional, Tuple, Union
+import json
 
-import math
-
-from PIL import Image
 import numpy as np
+import PIL.Image
+import torch
+from diffusers.image_processor import PipelineImageInput, VaeImageProcessor, is_valid_image_imagelist
+from diffusers.configuration_utils import register_to_config
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
-
 from diffusers.models.autoencoders import AutoencoderKL
+from diffusers.utils.torch_utils import randn_tensor
+
 from vllm_omni.diffusion.models.omnigen2.omnigen2_transformer import OmniGen2Transformer2DModel, OmniGen2RotaryPosEmbed
 from vllm_omni.diffusion.models.omnigen2.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler,
 )
-from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-
-from dataclasses import dataclass
-
-import PIL.Image
-
-from diffusers.utils import BaseOutput
-
-
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
@@ -41,31 +35,28 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
-def get_omnigen2_pre_process_func(
-    od_config: OmniDiffusionConfig,
-):
-    """Pre-processing function for OmniGen2Pipeline."""
-    return None
-
-
 def get_omnigen2_post_process_func(
     od_config: OmniDiffusionConfig,
 ):
-    """Post-processing function for OmniGen2Pipeline."""
-    return None
+    model_name = od_config.model
+    if os.path.exists(model_name):
+        model_path = model_name
+    else:
+        model_path = download_weights_from_hf_specific(model_name, None, ["*"])
+    vae_config_path = os.path.join(model_path, "vae/config.json")
+    with open(vae_config_path) as f:
+        vae_config = json.load(f)
+        vae_scale_factor = 2 ** (len(vae_config["block_out_channels"]) - 1) if "block_out_channels" in vae_config else 8
+        print(f"vae_scale_factor from get_omnigen2_post_process_func: {vae_scale_factor}")
 
+    image_processor = OmniGen2ImageProcessor(vae_scale_factor=vae_scale_factor * 2, do_resize=True)
 
-import math
-import warnings
-from typing import List, Optional, Tuple, Union
+    def post_process_func(
+        images: torch.Tensor,
+    ):
+        return image_processor.postprocess(images)
 
-import numpy as np
-import PIL.Image
-import torch
-
-from diffusers.image_processor import PipelineImageInput, VaeImageProcessor, is_valid_image_imagelist
-from diffusers.configuration_utils import register_to_config
-
+    return post_process_func
 
 class OmniGen2ImageProcessor(VaeImageProcessor):
     """
@@ -313,20 +304,6 @@ class OmniGen2ImageProcessor(VaeImageProcessor):
         return image
 
 
-@dataclass
-class FMPipelineOutput(BaseOutput):
-    """
-    Output class for OmniGen2 pipeline.
-
-    Args:
-        images (Union[List[PIL.Image.Image], np.ndarray]):
-            List of denoised PIL images of length `batch_size` or numpy array of shape
-            `(batch_size, height, width, num_channels)`. Contains the generated images.
-    """
-
-    images: Union[List[PIL.Image.Image], np.ndarray]
-
-
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
@@ -374,7 +351,6 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-# TODO(yupu): OmniGen2LoraLoaderMixin?
 class OmniGen2Pipeline(nn.Module):
     """
     Pipeline for text-to-image generation using OmniGen2.
@@ -393,18 +369,11 @@ class OmniGen2Pipeline(nn.Module):
         tokenizer (Union[Qwen2Tokenizer, Qwen2TokenizerFast]): The tokenizer for text processing.
     """
 
-    model_cpu_offload_seq = "mllm->transformer->vae"
-
     def __init__(
         self,
         *,
         od_config: OmniDiffusionConfig,
         prefix: str = "",
-        # transformer: OmniGen2Transformer2DModel,
-        # vae: AutoencoderKL,
-        # scheduler: FlowMatchEulerDiscreteScheduler,
-        # mllm: Qwen2_5_VLForConditionalGeneration,
-        # processor,
     ) -> None:
         """
         Initialize the OmniGen2 pipeline.
@@ -439,19 +408,9 @@ class OmniGen2Pipeline(nn.Module):
         self.mllm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model, subfolder="mllm", local_files_only=local_files_only
         ).to(self.device)
-        # TODO(yupu): device?
         self.processor = Qwen2_5_VLProcessor.from_pretrained(
             model, subfolder="processor", local_files_only=local_files_only
-        )  # .to(
-        #     self.device
-        # )
-        # self.register_modules(
-        #     transformer=transformer,
-        #     vae=vae,
-        #     scheduler=scheduler,
-        #     mllm=mllm,
-        #     processor=processor
-        # )
+        )
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
         )
@@ -743,7 +702,6 @@ class OmniGen2Pipeline(nn.Module):
     def cfg_range(self):
         return self._cfg_range
 
-    # TODO: use req
     @torch.no_grad()
     def forward(
         self,
@@ -754,7 +712,7 @@ class OmniGen2Pipeline(nn.Module):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         prompt_attention_mask: Optional[torch.LongTensor] = None,
         negative_prompt_attention_mask: Optional[torch.LongTensor] = None,
-        max_sequence_length: Optional[int] = None,
+        max_sequence_length: Optional[int] = 1024,
         callback_on_step_end_tensor_inputs: Optional[list[str]] = None,
         input_images: Optional[list[PIL.Image.Image]] = None,
         num_images_per_prompt: int = 1,
@@ -775,9 +733,7 @@ class OmniGen2Pipeline(nn.Module):
         return_dict: bool = True,
         verbose: bool = False,
         step_func=None,
-    ):
-        print(f"req: {req}")
-
+    ) -> DiffusionOutput:
         prompt = req.prompt if req.prompt is not None else prompt
         negative_prompt = req.negative_prompt if req.negative_prompt is not None else negative_prompt
         if prompt is None and prompt_embeds is None:
@@ -785,15 +741,17 @@ class OmniGen2Pipeline(nn.Module):
 
         height = req.height or height or self.default_sample_size * self.vae_scale_factor
         width = req.width or width or self.default_sample_size * self.vae_scale_factor
-
+        generator = req.generator or generator
         num_inference_steps = req.num_inference_steps or num_inference_steps
-
-        self._text_guidance_scale = req.guidance_scale or text_guidance_scale
+        # TODO(yupu): Add guidance_scale in `text_to_image.py`
+        self._text_guidance_scale = req.true_cfg_scale or req.guidance_scale or text_guidance_scale
         self._image_guidance_scale = req.guidance_scale_2 or image_guidance_scale
         self._cfg_range = cfg_range
         self._attention_kwargs = attention_kwargs
+        req_num_outputs = getattr(req, "num_outputs_per_prompt", None)
+        if req_num_outputs and req_num_outputs > 0:
+            num_images_per_prompt = req_num_outputs
 
-        # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -802,8 +760,6 @@ class OmniGen2Pipeline(nn.Module):
             batch_size = prompt_embeds.shape[0]
 
         device = self.device
-        print(f"self.device: {self.device}")
-
         # 3. Encode input prompt
         (
             prompt_embeds,
@@ -893,17 +849,7 @@ class OmniGen2Pipeline(nn.Module):
 
         image = F.interpolate(image, size=(ori_height, ori_width), mode="bilinear")
 
-        image = self.image_processor.postprocess(image, output_type=output_type)
-
-        print("end forward")
-
-        for i in range(len(image)):
-            image[i].save(f"omnigen2_image_{i}.png")
-
-        if not return_dict:
-            return image
-        else:
-            return FMPipelineOutput(images=image)
+        return DiffusionOutput(output=image)
 
     def processing(
         self,

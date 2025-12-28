@@ -12,27 +12,26 @@ from vllm_omni.utils.platform_utils import detect_device_type, is_npu
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a video with Wan2.2 T2V.")
+    parser = argparse.ArgumentParser(description="Generate a video with OmniGen2.")
     parser.add_argument(
         "--model",
-        default="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        help="Diffusers Wan2.2 model ID or local path.",
+        default="",
+        help="Path to the OmniGen2 model.",
     )
-    parser.add_argument("--prompt", default="A serene lakeside sunrise with mist over the water.", help="Text prompt.")
-    parser.add_argument("--negative_prompt", default="", help="Negative prompt.")
+    parser.add_argument("--prompt", type=str, default="The sun rises slightly, the dew on the rose petals in the garden is clear, a crystal ladybug is crawling to the dew, the background is the early morning garden, macro lens.", help="Text prompt.")
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default="(((deformed))), blurry, over saturation, bad anatomy, disfigured, poorly drawn face, mutation, mutated, (extra_limb), (ugly), (poorly drawn hands), fused fingers, messy drawing, broken legs censor, censored, censor_bar",
+        help="Negative prompt for generation."
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--guidance_scale", type=float, default=4.0, help="CFG scale (applied to low/high).")
     parser.add_argument("--guidance_scale_high", type=float, default=None, help="Optional separate CFG for high-noise.")
     parser.add_argument("--height", type=int, default=720, help="Video height.")
     parser.add_argument("--width", type=int, default=1280, help="Video width.")
-    parser.add_argument("--num_frames", type=int, default=81, help="Number of frames (Wan default is 81).")
     parser.add_argument("--num_inference_steps", type=int, default=40, help="Sampling steps.")
-    parser.add_argument("--boundary_ratio", type=float, default=0.875, help="Boundary split ratio for low/high DiT.")
-    parser.add_argument(
-        "--flow_shift", type=float, default=5.0, help="Scheduler flow_shift (5.0 for 720p, 12.0 for 480p)."
-    )
     parser.add_argument("--output", type=str, default="wan22_output.mp4", help="Path to save the video (mp4).")
-    parser.add_argument("--fps", type=int, default=24, help="Frames per second for the output video.")
     return parser.parse_args()
 
 
