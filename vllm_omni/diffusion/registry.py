@@ -63,6 +63,7 @@ _DIFFUSION_MODELS = {
         "sd3",
         "pipeline_sd3",
         "StableDiffusion3Pipeline",
+    ),
     "OmniGen2Pipeline": (
         "omnigen2",
         "pipeline_omnigen2",

@@ -27,7 +27,6 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Negative prompt for image generation."
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic results.")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale for text-to-image generation.")
     parser.add_argument(
         "--cfg_scale",
